@@ -1,60 +1,63 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { pool } = require('../config/db');
-const { 
-  createSession, 
-  deleteSessionByToken, 
+const userRepository = require('../repositories/userRepository');
+const {
+  createSession,
+  deleteSessionByToken,
   deleteUserSessions,
-  getUserSessions 
+  getUserSessions
 } = require('../utils/sessionManager');
+const { sendSuccess, sendError, sendCreated, sendNotFound, sendUnauthorized, sendBadRequest } = require('../utils/responseFormatter');
 
 const register = async (req, res) => {
   const { username, email, password } = req.body;
 
   try {
     if (!username || !email || !password) {
-      return res.status(400).json({ error: 'All fields are required' });
+      return sendBadRequest(res, 'All fields are required');
     }
 
-    const [existingUsers] = await pool.query(
-      'SELECT * FROM users WHERE email = ? OR username = ?',
-      [email, username]
-    );
+    // Check if user already exists
+    const existingUser = await userRepository.findByEmailOrUsername(email, username);
 
-    if (existingUsers.length > 0) {
-      return res.status(400).json({ error: 'User already exists with this email or username' });
+    if (existingUser) {
+      return sendBadRequest(res, 'User already exists with this email or username');
     }
 
+    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const [result] = await pool.query(
-      'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
-      [username, email, hashedPassword]
-    );
+    // Create user
+    const user = await userRepository.create({
+      username,
+      email,
+      password: hashedPassword
+    });
 
+    // Generate JWT token
     const token = jwt.sign(
-      { id: result.insertId, username, email },
+      { id: user.id, username, email },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    const { sessionId, expiresAt } = await createSession(result.insertId, token, req);
+    // Create session
+    const { sessionId, expiresAt } = await createSession(user.id, token, req);
 
-    res.status(201).json({
-      message: 'User registered successfully',
+    sendCreated(res, {
       token,
       sessionId,
       expiresAt,
       user: {
-        id: result.insertId,
+        id: user.id,
         username,
         email
       }
-    });
+    }, 'User registered successfully');
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Server error during registration' });
+    sendError(res, 'Server error during registration');
   }
 };
 
@@ -63,33 +66,34 @@ const login = async (req, res) => {
 
   try {
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return sendBadRequest(res, 'Email and password are required');
     }
 
-    const [users] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    // Find user by email
+    const user = await userRepository.findByEmail(email);
 
-    if (users.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) {
+      return sendUnauthorized(res, 'Invalid credentials');
     }
 
-    const user = users[0];
-
+    // Verify password
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return sendUnauthorized(res, 'Invalid credentials');
     }
 
+    // Generate JWT token
     const token = jwt.sign(
       { id: user.id, username: user.username, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
+    // Create session
     const { sessionId, expiresAt } = await createSession(user.id, token, req);
 
-    res.json({
-      message: 'Login successful',
+    sendSuccess(res, {
       token,
       sessionId,
       expiresAt,
@@ -98,63 +102,60 @@ const login = async (req, res) => {
         username: user.username,
         email: user.email
       }
-    });
+    }, 'Login successful');
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: 'Server error during login' });
+    sendError(res, 'Server error during login');
   }
 };
 
 const logout = async (req, res) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '');
-    
+
     if (token) {
       await deleteSessionByToken(token);
     }
 
-    res.json({ message: 'Logout successful' });
+    sendSuccess(res, null, 'Logout successful');
   } catch (error) {
     console.error('Logout error:', error);
-    res.status(500).json({ error: 'Server error during logout' });
+    sendError(res, 'Server error during logout');
   }
 };
 
 const getProfile = async (req, res) => {
   try {
-    const [users] = await pool.query(
-      'SELECT id, username, email, created_at FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const user = await userRepository.findById(req.user.id);
 
-    if (users.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
+    if (!user) {
+      return sendNotFound(res, 'User not found');
     }
 
-    res.json({ user: users[0] });
+    sendSuccess(res, { user });
   } catch (error) {
     console.error('Profile fetch error:', error);
-    res.status(500).json({ error: 'Server error fetching profile' });
+    sendError(res, 'Server error fetching profile');
   }
 };
 
 const getSessions = async (req, res) => {
   try {
     const sessions = await getUserSessions(req.user.id);
-    res.json({ sessions });
+    sendSuccess(res, { sessions });
   } catch (error) {
     console.error('Get sessions error:', error);
-    res.status(500).json({ error: 'Server error fetching sessions' });
+    sendError(res, 'Server error fetching sessions');
   }
 };
 
 const logoutAll = async (req, res) => {
   try {
     await deleteUserSessions(req.user.id);
-    res.json({ message: 'Logged out from all devices successfully' });
+    sendSuccess(res, null, 'Logged out from all devices successfully');
   } catch (error) {
     console.error('Logout all error:', error);
-    res.status(500).json({ error: 'Server error during logout' });
+    sendError(res, 'Server error during logout');
   }
 };
 

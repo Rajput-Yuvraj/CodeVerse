@@ -9,7 +9,12 @@ const pool = mysql.createPool({
   port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  connectTimeout: 10000,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 30000,
+  idleTimeout: 60000,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined
 });
 
 const promisePool = pool.promise();
@@ -76,6 +81,20 @@ const initializeDatabase = async () => {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         INDEX idx_user (user_id),
         INDEX idx_expires (expires_at)
+      )
+    `);
+
+    await promisePool.query(`
+      CREATE TABLE IF NOT EXISTS file_save_events (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        workspace_id VARCHAR(36) NOT NULL,
+        file_id INT NOT NULL,
+        user_id INT NOT NULL,
+        saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_save_user_date (user_id, saved_at),
+        INDEX idx_save_workspace_date (workspace_id, saved_at)
       )
     `);
 
